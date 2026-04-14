@@ -19,4 +19,5 @@ services:
         value: "120000"
       - key: AUDIO_OUTPUT_MODE
         value: mp3
-
+      - key: YTDL_CLIENTS
+        value: WEB,WEB_EMBEDDED,IOS,ANDROID

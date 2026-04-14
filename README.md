@@ -34,6 +34,8 @@ Copy `.env.example` to `.env` for local runs.
 - `META_TIMEOUT_MS=20000`
 - `STREAM_TIMEOUT_MS=120000`
 - `AUDIO_OUTPUT_MODE=mp3` (`mp3` or `passthrough`)
+- `YTDL_CLIENTS=WEB,WEB_EMBEDDED,IOS,ANDROID`
+- `YOUTUBE_COOKIE=` (optional but recommended for bot-check/sign-in protected videos)
 
 If ffmpeg conversion is restricted in a host, set:
 
@@ -42,6 +44,28 @@ AUDIO_OUTPUT_MODE=passthrough
 ```
 
 Then audio downloads are served as original stream format (usually webm/m4a) instead of mp3.
+
+## YouTube sign-in / bot verification fix
+
+If you see:
+
+```text
+This video requires sign-in or bot verification...
+```
+
+set `YOUTUBE_COOKIE` on Render.
+
+Format can be either:
+
+1) Raw cookie header string:
+
+```text
+SID=...; HSID=...; SSID=...; APISID=...; SAPISID=...
+```
+
+2) JSON array cookie format (advanced)
+
+After setting `YOUTUBE_COOKIE`, redeploy.
 
 ## Local run
 
@@ -65,8 +89,9 @@ powershell -ExecutionPolicy Bypass -File scripts/smoke-test.ps1 -BaseUrl "http:/
    - Runtime: Node
    - Build Command: `npm install`
    - Start Command: `npm start`
-5. Add env var:
+5. Add env vars:
    - `FRONTEND_ORIGINS=https://theagefinder.pages.dev`
+   - (optional, for tougher videos) `YOUTUBE_COOKIE=<your cookie string>`
 6. Deploy.
 
 Render gives URL like:
@@ -77,7 +102,7 @@ https://video-downloader-backend-xxxx.onrender.com
 
 ## Frontend integration (already supported)
 
-The downloader page in `age-calculator` supports a backend URL override using localStorage key `VIDEO_BACKEND_BASE_URL`.
+The downloader page in `age-calculator` supports backend URL override using localStorage key `VIDEO_BACKEND_BASE_URL`.
 
 After backend deploy, run once in browser console on your frontend:
 

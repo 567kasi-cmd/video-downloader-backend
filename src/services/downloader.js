@@ -10,6 +10,7 @@ const QUALITY_ORDER = ['144p', '240p', '360p', '480p', '720p', '1080p', '1440p',
 const META_TIMEOUT_MS = Number(process.env.META_TIMEOUT_MS || 20_000);
 const STREAM_TIMEOUT_MS = Number(process.env.STREAM_TIMEOUT_MS || 120_000);
 const AUDIO_OUTPUT_MODE = (process.env.AUDIO_OUTPUT_MODE || 'mp3').toLowerCase();
+const DEFAULT_CLIENTS = ['WEB', 'WEB_EMBEDDED', 'IOS', 'ANDROID'];
 
 function cleanFileName(name) {
   return (name || 'download')
@@ -65,8 +66,8 @@ function normalizeYtdlError(error, fallbackMessage) {
     return e;
   }
 
-  if (raw.includes('sign in') || raw.includes('captcha')) {
-    const e = new Error('This video requires sign-in or bot verification and cannot be downloaded right now.');
+  if (raw.includes('sign in') || raw.includes('captcha') || raw.includes('bot')) {
+    const e = new Error('This video requires sign-in or bot verification. Add YOUTUBE_COOKIE env on backend and redeploy, then retry.');
     e.status = 422;
     return e;
   }
@@ -76,6 +77,84 @@ function normalizeYtdlError(error, fallbackMessage) {
   return e;
 }
 
+function parseClients() {
+  const fromEnv = (process.env.YTDL_CLIENTS || '')
+    .split(',')
+    .map((v) => v.trim().toUpperCase())
+    .filter(Boolean);
+  return fromEnv.length ? fromEnv : DEFAULT_CLIENTS;
+}
+
+function parseCookieEnv() {
+  const raw = (process.env.YOUTUBE_COOKIE || '').trim();
+  if (!raw) return null;
+
+  // Supports either full cookie header string or JSON array string.
+  if (raw.startsWith('[')) {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+
+  const parts = raw.split(';').map((p) => p.trim()).filter(Boolean);
+  return parts.map((entry) => {
+    const eq = entry.indexOf('=');
+    if (eq === -1) return null;
+    const name = entry.slice(0, eq).trim();
+    const value = entry.slice(eq + 1).trim();
+    if (!name) return null;
+    return {
+      domain: '.youtube.com',
+      path: '/',
+      secure: true,
+      httpOnly: false,
+      sameSite: 'Lax',
+      name,
+      value
+    };
+  }).filter(Boolean);
+}
+
+function createYtdlAgentIfAvailable() {
+  const cookies = parseCookieEnv();
+  if (!cookies || !cookies.length) return null;
+  try {
+    return ytdl.createAgent(cookies);
+  } catch {
+    return null;
+  }
+}
+
+async function getInfoWithFallback(url) {
+  const clients = parseClients();
+  const agent = createYtdlAgentIfAvailable();
+  const attempts = [];
+
+  for (const client of clients) {
+    try {
+      const options = {
+        playerClients: [client]
+      };
+      if (agent) options.agent = agent;
+
+      const info = await withTimeout(
+        ytdl.getInfo(url, options),
+        META_TIMEOUT_MS,
+        `Timed out while fetching metadata using client ${client}.`
+      );
+
+      return { info, agent, client };
+    } catch (error) {
+      attempts.push(`${client}: ${error.message}`);
+    }
+  }
+
+  const finalError = new Error(attempts.join(' | '));
+  throw finalError;
+}
+
 async function getVideoInfo(url) {
   if (!ytdl.validateURL(url)) {
     const error = new Error('Unsupported or invalid YouTube URL.');
@@ -83,13 +162,14 @@ async function getVideoInfo(url) {
     throw error;
   }
 
-  let info;
+  let result;
   try {
-    info = await withTimeout(ytdl.getInfo(url), META_TIMEOUT_MS, 'Timed out while fetching video metadata.');
+    result = await getInfoWithFallback(url);
   } catch (error) {
     throw normalizeYtdlError(error, 'Failed to fetch YouTube metadata.');
   }
 
+  const info = result.info;
   const title = info.videoDetails?.title || 'YouTube Video';
   const thumbnail = info.videoDetails?.thumbnails?.slice(-1)[0]?.url || '';
 
@@ -122,7 +202,7 @@ async function getVideoInfo(url) {
     thumbnail,
     qualities: qualities.length ? qualities : [{ value: '360p', label: '360p', default: true }],
     supportsAudio: true,
-    qualityMessage: 'Available qualities fetched from YouTube.'
+    qualityMessage: `Available qualities fetched from YouTube (client: ${result.client}).`
   };
 }
 
@@ -133,13 +213,14 @@ async function streamVideo({ url, quality, res }) {
     throw error;
   }
 
-  let info;
+  let result;
   try {
-    info = await withTimeout(ytdl.getInfo(url), META_TIMEOUT_MS, 'Timed out while fetching video metadata.');
+    result = await getInfoWithFallback(url);
   } catch (error) {
     throw normalizeYtdlError(error, 'Failed to prepare video stream.');
   }
 
+  const info = result.info;
   const chosen = pickNearestQuality(info.formats, quality);
   if (!chosen) {
     const error = new Error('No downloadable video format found for this URL.');
@@ -156,11 +237,14 @@ async function streamVideo({ url, quality, res }) {
   }
   res.setTimeout(STREAM_TIMEOUT_MS);
 
-  const stream = ytdl.downloadFromInfo(info, {
+  const downloadOptions = {
     quality: chosen.itag,
-    highWaterMark: 1 << 25
-  });
+    highWaterMark: 1 << 25,
+    playerClients: [result.client]
+  };
+  if (result.agent) downloadOptions.agent = result.agent;
 
+  const stream = ytdl.downloadFromInfo(info, downloadOptions);
   stream.on('error', () => {
     if (!res.headersSent) {
       res.status(500).json({ error: 'Video stream failed. Please try another video.' });
@@ -179,22 +263,26 @@ async function streamAudio({ url, res }) {
     throw error;
   }
 
-  let info;
+  let result;
   try {
-    info = await withTimeout(ytdl.getInfo(url), META_TIMEOUT_MS, 'Timed out while fetching audio metadata.');
+    result = await getInfoWithFallback(url);
   } catch (error) {
     throw normalizeYtdlError(error, 'Failed to prepare audio stream.');
   }
 
+  const info = result.info;
   const base = cleanFileName(info.videoDetails?.title || 'audio-download');
   res.setTimeout(STREAM_TIMEOUT_MS);
 
-  const audioStream = ytdl.downloadFromInfo(info, {
+  const downloadOptions = {
     quality: 'highestaudio',
     filter: 'audioonly',
-    highWaterMark: 1 << 25
-  });
+    highWaterMark: 1 << 25,
+    playerClients: [result.client]
+  };
+  if (result.agent) downloadOptions.agent = result.agent;
 
+  const audioStream = ytdl.downloadFromInfo(info, downloadOptions);
   audioStream.on('error', () => {
     if (!res.headersSent) {
       res.status(500).json({ error: 'Audio stream failed. Please try another video.' });
