@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: video-downloader-backend
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    autoDeploy: true
+    envVars:
+      - key: FRONTEND_ORIGINS
+        value: https://theagefinder.pages.dev
+      - key: RATE_LIMIT_WINDOW_MS
+        value: "60000"
+      - key: RATE_LIMIT_MAX
+        value: "40"
+      - key: META_TIMEOUT_MS
+        value: "20000"
+      - key: STREAM_TIMEOUT_MS
+        value: "120000"
+      - key: AUDIO_OUTPUT_MODE
+        value: mp3
+
