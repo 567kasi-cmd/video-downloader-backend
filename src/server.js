@@ -80,7 +80,13 @@ app.use(express.json({ limit: '1mb' }));
 app.use(rateLimit);
 
 app.get('/health', (req, res) => {
-  res.json({ ok: true, service: 'video-downloader-backend' });
+  res.json({
+    ok: true,
+    service: 'video-downloader-backend',
+    audioMode: process.env.AUDIO_OUTPUT_MODE || 'mp3',
+    ytdlClients: process.env.YTDL_CLIENTS || 'WEB,WEB_EMBEDDED,IOS,ANDROID',
+    youtubeCookieConfigured: Boolean((process.env.YOUTUBE_COOKIE || '').trim())
+  });
 });
 
 app.use('/', videoRouter);
