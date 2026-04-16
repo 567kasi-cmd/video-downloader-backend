@@ -20,7 +20,7 @@ services:
       - key: AUDIO_OUTPUT_MODE
         value: mp3
       - key: YTDL_CLIENTS
-        value: WEB,WEB_EMBEDDED,IOS,ANDROID
+        value: WEB,WEB_EMBEDDED,MWEB,ANDROID,IOS,TVHTML5_SIMPLY_EMBEDDED_PLAYER
       - key: YTDL_RETRY_ROUNDS
         value: "2"
       - key: YTDL_RETRY_DELAY_MS

@@ -10,7 +10,7 @@ const QUALITY_ORDER = ['144p', '240p', '360p', '480p', '720p', '1080p', '1440p',
 const META_TIMEOUT_MS = Number(process.env.META_TIMEOUT_MS || 20_000);
 const STREAM_TIMEOUT_MS = Number(process.env.STREAM_TIMEOUT_MS || 120_000);
 const AUDIO_OUTPUT_MODE = (process.env.AUDIO_OUTPUT_MODE || 'mp3').toLowerCase();
-const DEFAULT_CLIENTS = ['WEB', 'WEB_EMBEDDED', 'IOS', 'ANDROID'];
+const DEFAULT_CLIENTS = ['WEB', 'WEB_EMBEDDED', 'MWEB', 'ANDROID', 'IOS', 'TVHTML5_SIMPLY_EMBEDDED_PLAYER'];
 
 const INFO_CACHE_TTL_MS = Number(process.env.INFO_CACHE_TTL_MS || 120_000);
 const META_CACHE_TTL_MS = Number(process.env.META_CACHE_TTL_MS || 300_000);
@@ -95,6 +95,7 @@ function pickNearestQuality(formats, targetQuality) {
 
 function normalizeYtdlError(error, fallbackMessage) {
   const raw = String(error?.message || '').toLowerCase();
+  const hasCookie = Boolean(parseCookieEnv()?.length);
 
   if (raw.includes('status code: 410') || raw.includes('status code: 403')) {
     const e = new Error('This video is unavailable, private, or blocked for extraction.');
@@ -109,7 +110,11 @@ function normalizeYtdlError(error, fallbackMessage) {
   }
 
   if (raw.includes('sign in') || raw.includes('captcha') || raw.includes('bot')) {
-    const e = new Error('This video requires sign-in or bot verification. Add YOUTUBE_COOKIE env on backend and redeploy, then retry.');
+    const e = new Error(
+      hasCookie
+        ? 'YouTube still requires verification. Refresh YOUTUBE_COOKIE with a newly logged-in session and redeploy.'
+        : 'This video requires sign-in or bot verification. Add YOUTUBE_COOKIE env on backend and redeploy, then retry.'
+    );
     e.status = 422;
     return e;
   }
