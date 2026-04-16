@@ -21,3 +21,11 @@ services:
         value: mp3
       - key: YTDL_CLIENTS
         value: WEB,WEB_EMBEDDED,IOS,ANDROID
+      - key: YTDL_RETRY_ROUNDS
+        value: "2"
+      - key: YTDL_RETRY_DELAY_MS
+        value: "1200"
+      - key: INFO_CACHE_TTL_MS
+        value: "120000"
+      - key: META_CACHE_TTL_MS
+        value: "300000"

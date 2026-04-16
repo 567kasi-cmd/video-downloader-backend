@@ -12,6 +12,14 @@ const STREAM_TIMEOUT_MS = Number(process.env.STREAM_TIMEOUT_MS || 120_000);
 const AUDIO_OUTPUT_MODE = (process.env.AUDIO_OUTPUT_MODE || 'mp3').toLowerCase();
 const DEFAULT_CLIENTS = ['WEB', 'WEB_EMBEDDED', 'IOS', 'ANDROID'];
 
+const INFO_CACHE_TTL_MS = Number(process.env.INFO_CACHE_TTL_MS || 120_000);
+const META_CACHE_TTL_MS = Number(process.env.META_CACHE_TTL_MS || 300_000);
+const YTDL_RETRY_ROUNDS = Number(process.env.YTDL_RETRY_ROUNDS || 2);
+const YTDL_RETRY_DELAY_MS = Number(process.env.YTDL_RETRY_DELAY_MS || 1200);
+
+const infoCache = new Map();
+const metaCache = new Map();
+
 function cleanFileName(name) {
   return (name || 'download')
     .replace(/[<>:"/\\|?*]+/g, '')
@@ -32,6 +40,40 @@ function withTimeout(promise, timeoutMs, timeoutMessage) {
     })
   ]);
 }
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+}
+
+function getCache(cache, key) {
+  const row = cache.get(key);
+  if (!row) return null;
+  if (Date.now() > row.expiresAt) {
+    cache.delete(key);
+    return null;
+  }
+  return row.value;
+}
+
+function setCache(cache, key, value, ttlMs) {
+  cache.set(key, {
+    value,
+    expiresAt: Date.now() + ttlMs
+  });
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, row] of infoCache.entries()) {
+    if (now > row.expiresAt) infoCache.delete(key);
+  }
+  for (const [key, row] of metaCache.entries()) {
+    if (now > row.expiresAt) metaCache.delete(key);
+  }
+}, 60_000).unref();
 
 function pickNearestQuality(formats, targetQuality) {
   const videoFormats = formats.filter((f) => f.hasVideo && f.hasAudio && f.qualityLabel);
@@ -60,8 +102,8 @@ function normalizeYtdlError(error, fallbackMessage) {
     return e;
   }
 
-  if (raw.includes('too many') || raw.includes('429')) {
-    const e = new Error('Rate limited by YouTube. Please wait and try again.');
+  if (raw.includes('too many') || raw.includes('429') || raw.includes('rate')) {
+    const e = new Error('Rate limited by YouTube. Please wait 1-2 minutes and try again.');
     e.status = 429;
     return e;
   }
@@ -89,7 +131,6 @@ function parseCookieEnv() {
   const raw = (process.env.YOUTUBE_COOKIE || '').trim();
   if (!raw) return null;
 
-  // Supports either full cookie header string or JSON array string.
   if (raw.startsWith('[')) {
     try {
       return JSON.parse(raw);
@@ -128,47 +169,45 @@ function createYtdlAgentIfAvailable() {
 }
 
 async function getInfoWithFallback(url) {
+  const cacheKey = `info:${url}`;
+  const cached = getCache(infoCache, cacheKey);
+  if (cached) {
+    return cached;
+  }
+
   const clients = parseClients();
   const agent = createYtdlAgentIfAvailable();
   const attempts = [];
 
-  for (const client of clients) {
-    try {
-      const options = {
-        playerClients: [client]
-      };
-      if (agent) options.agent = agent;
+  for (let round = 1; round <= Math.max(1, YTDL_RETRY_ROUNDS); round++) {
+    for (const client of clients) {
+      try {
+        const options = { playerClients: [client] };
+        if (agent) options.agent = agent;
 
-      const info = await withTimeout(
-        ytdl.getInfo(url, options),
-        META_TIMEOUT_MS,
-        `Timed out while fetching metadata using client ${client}.`
-      );
+        const info = await withTimeout(
+          ytdl.getInfo(url, options),
+          META_TIMEOUT_MS,
+          `Timed out while fetching metadata using client ${client}.`
+        );
 
-      return { info, agent, client };
-    } catch (error) {
-      attempts.push(`${client}: ${error.message}`);
+        const result = { info, agent, client };
+        setCache(infoCache, cacheKey, result, INFO_CACHE_TTL_MS);
+        return result;
+      } catch (error) {
+        attempts.push(`round ${round}/${YTDL_RETRY_ROUNDS} ${client}: ${error.message}`);
+      }
+    }
+
+    if (round < YTDL_RETRY_ROUNDS) {
+      await sleep(YTDL_RETRY_DELAY_MS * round);
     }
   }
 
-  const finalError = new Error(attempts.join(' | '));
-  throw finalError;
+  throw new Error(attempts.join(' | '));
 }
 
-async function getVideoInfo(url) {
-  if (!ytdl.validateURL(url)) {
-    const error = new Error('Unsupported or invalid YouTube URL.');
-    error.status = 400;
-    throw error;
-  }
-
-  let result;
-  try {
-    result = await getInfoWithFallback(url);
-  } catch (error) {
-    throw normalizeYtdlError(error, 'Failed to fetch YouTube metadata.');
-  }
-
+function buildMetadataFromInfo(result) {
   const info = result.info;
   const title = info.videoDetails?.title || 'YouTube Video';
   const thumbnail = info.videoDetails?.thumbnails?.slice(-1)[0]?.url || '';
@@ -191,10 +230,7 @@ async function getVideoInfo(url) {
 
   const qualities = [...uniqueByLabel.values()]
     .sort((a, b) => Number(a.value.replace('p', '')) - Number(b.value.replace('p', '')))
-    .map((item) => ({
-      ...item,
-      default: item.value === '360p'
-    }));
+    .map((item) => ({ ...item, default: item.value === '360p' }));
 
   return {
     platform: 'youtube',
@@ -204,6 +240,31 @@ async function getVideoInfo(url) {
     supportsAudio: true,
     qualityMessage: `Available qualities fetched from YouTube (client: ${result.client}).`
   };
+}
+
+async function getVideoInfo(url) {
+  if (!ytdl.validateURL(url)) {
+    const error = new Error('Unsupported or invalid YouTube URL.');
+    error.status = 400;
+    throw error;
+  }
+
+  const cacheKey = `meta:${url}`;
+  const cachedMeta = getCache(metaCache, cacheKey);
+  if (cachedMeta) {
+    return cachedMeta;
+  }
+
+  let result;
+  try {
+    result = await getInfoWithFallback(url);
+  } catch (error) {
+    throw normalizeYtdlError(error, 'Failed to fetch YouTube metadata.');
+  }
+
+  const metadata = buildMetadataFromInfo(result);
+  setCache(metaCache, cacheKey, metadata, META_CACHE_TTL_MS);
+  return metadata;
 }
 
 async function streamVideo({ url, quality, res }) {
